@@ -236,7 +236,23 @@ static char *parse_acpi_args(char *input, int *nargs, union acpi_object **args)
                 buf = (u8*) kmalloc(arg->buffer.length, GFP_KERNEL);
                 memcpy(buf, temporary_buffer, arg->buffer.length);
                 arg->buffer.pointer = buf;
-            } else {
+            } else if (*s == '[') {
+                // decode package
+		char *package_begin;
+		package_begin = s;
+
+		*s = ' ';
+
+                arg->type = ACPI_TYPE_PACKAGE;
+                while (*s) {
+                    if (*s == ']') {
+                        *s = 0;
+                        break;
+                    }
+                    ++s;
+                }
+		parse_acpi_args(package_begin, &arg->package.count, &arg->package.elements);
+	    } else {
                 // decode integer, N or 0xN
                 arg->type = ACPI_TYPE_INTEGER;
                 if (s[0] == '0' && s[1] == 'x') {
@@ -254,6 +270,22 @@ static char *parse_acpi_args(char *input, int *nargs, union acpi_object **args)
     return input;
 }
 
+static void cleanup_buffers(union acpi_object **args, int nargs) {
+        int i;
+
+        if (*args) {
+            for (i=0; i<nargs; i++) {
+                if ((*args)[i].type == ACPI_TYPE_BUFFER) {
+                    kfree((*args)[i].buffer.pointer);
+		} else if ((*args)[i].type == ACPI_TYPE_PACKAGE) {
+		    cleanup_buffers(&(*args)[i].package.elements, (*args)[i].package.count);
+		}
+            }
+            kfree(*args);
+	    args = 0;
+        }
+}
+
 /** procfs write callback. Called when writing into /proc/acpi/call.
 */
 #ifdef HAVE_PROC_CREATE
@@ -266,7 +298,7 @@ static int acpi_proc_write( struct file *filp, const char __user *buff,
 {
     char input[2 * BUFFER_SIZE] = { '\0' };
     union acpi_object *args;
-    int nargs, i;
+    int nargs;
     char *method;
 
     if (len > sizeof(input) - 1) {
@@ -284,12 +316,7 @@ static int acpi_proc_write( struct file *filp, const char __user *buff,
     method = parse_acpi_args(input, &nargs, &args);
     if (method) {
         do_acpi_call(method, nargs, args);
-        if (args) {
-            for (i=0; i<nargs; i++)
-                if (args[i].type == ACPI_TYPE_BUFFER)
-                    kfree(args[i].buffer.pointer);
-            kfree(args);
-        }
+	cleanup_buffers(&args, nargs);
     }
 
     return len;
